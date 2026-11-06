@@ -1,3 +1,5 @@
+![Demo kết quả](img_answer/Screenshot%202026-11-06%20220728.png)
+
 # Student Guide: Nền tảng LLM API (Step-by-Step Walkthrough)
 
 > [!NOTE]
