@@ -3,6 +3,25 @@
 > [!NOTE]
 > Tài liệu này được thiết kế để hỗ trợ bạn hoàn thành bài Lab 01 một cách nhanh chóng nhất. Hãy sử dụng nó làm cẩm nang khi triển khai các hàm trong `template.py`.
 
+> [!IMPORTANT]
+> Free-tier migration note: this workspace maps `call_openai` to OpenRouter,
+> `call_gemini` to Google Gemini, and `call_anthropic` to OpenRouter's Free
+> Models Router. These are compatibility substitutions, not official OpenAI or
+> Anthropic integrations. The original OpenAI/Anthropic instructions below are
+> retained as historical lab context.
+
+## Free-tier provider mapping
+
+| Assignment function | Actual provider | Default model | API key |
+|---|---|---|---|
+| `call_openai` | OpenRouter | `google/gemma-4-31b-it:free` | `OPENAI_API_KEY` |
+| `call_gemini` | Google Gemini Free Tier | `gemini-3.8-flash` | `GEMINI_API_KEY` |
+| `call_anthropic` | OpenRouter Free Models Router | `openrouter/free` | `OPENAI_API_KEY` |
+
+The OpenRouter fallbacks use only explicitly free models:
+`openrouter/free`, `google/gemma-4-26b-a4b-it:free`. The Gemini fallback uses
+`gemini-3.6-flash`. Model IDs remain configurable through `.env`.
+
 ---
 
 ## 🛠️ 1. Khởi tạo Môi trường & Thiết lập API Keys
@@ -81,6 +100,18 @@ Bạn có thể thiết lập biến môi trường trực tiếp từ terminal 
 
 > [!TIP]
 > Để tránh việc phải nhập lại lệnh thiết lập mỗi khi tắt terminal, bạn có thể tạo một file [.env](file:///j:/VinUniCodelab/VinUni_Codelab_Day01/.env) đặt ở thư mục gốc của project (sử dụng mẫu từ [.env.example](file:///j:/VinUniCodelab/VinUni_Codelab_Day01/.env.example)) và sử dụng thư viện `python-dotenv` để load tự động trong code.
+
+---
+
+### 🔹 1.4 Chạy bài lab
+
+Sau khi kích hoạt `.venv`, entry point chính thức là:
+
+```powershell
+python starter-code/template.py
+```
+
+Lệnh này chạy phần so sánh model rồi mở Gemini streaming chatbot. Nhập `quit` hoặc `exit` để thoát chatbot.
 
 ---
 

@@ -1,3 +1,17 @@
 .env
+.env.local
+.env.*
+!.env.example
+.evn
 .venv/
+.pytest_cache/
 __pycache__/
+*.pyc
+*.log
+*.tmp
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+*.key
+secrets/

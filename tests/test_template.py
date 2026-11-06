@@ -9,6 +9,9 @@ All external API calls are mocked — no real API keys or internet connection re
 """
 
 import importlib.util
+import inspect
+import io
+import contextlib
 import os
 import sys
 import unittest
@@ -126,35 +129,108 @@ class TestCallGemini(unittest.TestCase):
 
 class TestCallAnthropic(unittest.TestCase):
 
-    @patch("anthropic.Anthropic")
-    def test_anthropic_returns_tuple_structure(self, MockAnthropic):
+    @patch("openai.OpenAI")
+    def test_anthropic_name_maps_to_openrouter_free_router(self, MockOpenAI):
         mock_client = MagicMock()
-        MockAnthropic.return_value = mock_client
-        mock_client.messages.create.return_value = _make_anthropic_response("Claude Mock Response")
+        MockOpenAI.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _make_openai_response(
+            "Free Router Mock Response"
+        )
 
         text, latency, usage = call_anthropic("Hello")
 
-        self.assertEqual(text, "Claude Mock Response")
+        self.assertEqual(text, "Free Router Mock Response")
         self.assertIsInstance(latency, float)
         self.assertGreaterEqual(latency, 0.0)
-        self.assertEqual(usage["input_tokens"], 15)
-        self.assertEqual(usage["output_tokens"], 30)
+        self.assertEqual(usage["input_tokens"], 10)
+        self.assertEqual(usage["output_tokens"], 20)
+        self.assertEqual(
+            MockOpenAI.call_args.kwargs["base_url"],
+            "https://openrouter.ai/api/v1",
+        )
+
+    def test_openrouter_key_is_used_for_free_router_default(self):
+        with patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "openrouter-key"},
+        ), patch("openai.OpenAI") as mock_openai:
+            call_anthropic("Hello")
+
+        self.assertEqual(mock_openai.call_args.kwargs["api_key"], "openrouter-key")
+
+    def test_missing_openrouter_key_has_actionable_error(self):
+        with patch.dict(os.environ, {}, clear=True), patch("openai.OpenAI") as mock_openai:
+            with self.assertRaisesRegex(ValueError, "OPENAI_API_KEY"):
+                call_anthropic("Hello")
+
+        mock_openai.assert_not_called()
+
+    def test_explicit_groq_override_uses_groq_key(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ANTHROPIC_BASE_URL": "https://api.groq.com/openai/v1",
+                "GROQ_API_KEY": "groq-key",
+                "OPENAI_API_KEY": "openrouter-key",
+            },
+        ), patch("openai.OpenAI") as mock_openai:
+            call_anthropic("Hello")
+
+        self.assertEqual(mock_openai.call_args.kwargs["api_key"], "groq-key")
+        self.assertEqual(
+            mock_openai.call_args.kwargs["base_url"],
+            "https://api.groq.com/openai/v1",
+        )
+
+
+class TestProviderConfiguration(unittest.TestCase):
+    def test_free_tier_defaults_and_base_urls(self):
+        self.assertEqual(_m.OPENROUTER_BASE_URL, "https://openrouter.ai/api/v1")
+        self.assertEqual(_m.COMPAT_BASE_URL, "https://openrouter.ai/api/v1")
+        self.assertTrue(_m.OPENAI_MODEL.endswith(":free"))
+        self.assertTrue(_m.OPENAI_MINI_MODEL.endswith(":free"))
+        self.assertEqual(_m.GEMINI_MODEL, "gemini-3.8-flash")
+        self.assertEqual(_m.COMPAT_MODEL, "openrouter/free")
+
+    def test_public_signatures_are_preserved(self):
+        expected_names = {
+            "call_openai": {"prompt", "model", "temperature", "top_p", "max_tokens"},
+            "call_gemini": {"prompt", "model", "temperature", "top_p", "max_tokens"},
+            "call_anthropic": {"prompt", "model", "temperature", "top_p", "max_tokens"},
+            "compare_models": {"prompt"},
+            "streaming_chatbot": set(),
+            "retry_with_backoff": {"fn", "max_retries", "base_delay"},
+            "batch_compare": {"prompts"},
+            "format_comparison_table": {"results"},
+        }
+        for function_name, parameter_names in expected_names.items():
+            function = getattr(_m, function_name)
+            self.assertEqual(
+                set(inspect.signature(function).parameters),
+                parameter_names,
+            )
 
 
 class TestCompareModels(unittest.TestCase):
 
     def test_compare_models_evaluates_correct_costs(self):
         with patch.object(_m, "call_openai") as mock_openai, \
-             patch.object(_m, "call_gemini") as mock_gemini:
+             patch.object(_m, "call_gemini") as mock_gemini, \
+             patch.object(_m, "call_anthropic") as mock_compat:
              
             # Setup mock returns
             mock_openai.side_effect = [
-                ("GPT-4o Response", 0.5, {"input_tokens": 10, "output_tokens": 20}),       # 1st call: gpt-4o
-                ("GPT-4o-Mini Response", 0.3, {"input_tokens": 10, "output_tokens": 20}),  # 2nd call: gpt-4o-mini
+                ("GPT-4o Response", 0.5, {"input_tokens": 10, "output_tokens": 20}),       # OpenRouter gpt-4o
+                ("GPT-4o-Mini Response", 0.3, {"input_tokens": 10, "output_tokens": 20}),  # OpenRouter gpt-4o-mini
             ]
             mock_gemini.return_value = (
                 "Gemini Response",
                 0.4,
+                {"input_tokens": 10, "output_tokens": 20}
+            )
+            mock_compat.return_value = (
+                "Free Router Response",
+                0.2,
                 {"input_tokens": 10, "output_tokens": 20}
             )
 
@@ -164,16 +240,66 @@ class TestCompareModels(unittest.TestCase):
             self.assertIn("gpt4o", result)
             self.assertIn("gpt4o_mini", result)
             self.assertIn("gemini_flash", result)
+            self.assertIn("free_router", result)
 
             # Verify exact cost calculations
-            # gpt-4o: (10 * 5.0 + 20 * 20.0) / 1,000,000 = 0.00045
-            self.assertAlmostEqual(result["gpt4o"]["cost"], 0.00045, places=8)
+            # Both OpenRouter selections are explicit :free models.
+            self.assertAlmostEqual(result["gpt4o"]["cost"], 0.0, places=8)
             
-            # gpt-4o-mini: (10 * 0.150 + 20 * 0.600) / 1,000,000 = 0.0000135
-            self.assertAlmostEqual(result["gpt4o_mini"]["cost"], 0.0000135, places=8)
+            self.assertAlmostEqual(result["gpt4o_mini"]["cost"], 0.0, places=8)
             
-            # gemini-2.5-flash: (10 * 0.075 + 20 * 0.300) / 1,000,000 = 0.00000675
-            self.assertAlmostEqual(result["gemini_flash"]["cost"], 0.00000675, places=8)
+            # Gemini 3.8 Flash is free of charge on Google's documented Free Tier.
+            self.assertAlmostEqual(result["gemini_flash"]["cost"], 0.0, places=8)
+
+            # The Free Models Router is documented at USD 0 for both directions.
+            self.assertAlmostEqual(result["free_router"]["cost"], 0.0, places=8)
+
+    def test_compare_models_continues_when_one_provider_fails(self):
+        with patch.object(_m, "call_openai") as mock_openai, \
+             patch.object(_m, "call_gemini") as mock_gemini, \
+             patch.object(_m, "call_anthropic") as mock_compat:
+            mock_openai.side_effect = [
+                ("GPT-4o Response", 0.5, {"input_tokens": 10, "output_tokens": 20}),
+                ("GPT-4o-Mini Response", 0.3, {"input_tokens": 10, "output_tokens": 20}),
+            ]
+            mock_gemini.return_value = (
+                "Gemini Response",
+                0.4,
+                {"input_tokens": 10, "output_tokens": 20},
+            )
+            mock_compat.side_effect = RuntimeError("Provider unavailable")
+
+            result = compare_models("Prompt")
+
+            self.assertEqual(result["gpt4o"]["response"], "GPT-4o Response")
+            self.assertEqual(result["gemini_flash"]["response"], "Gemini Response")
+            self.assertIn("error", result["free_router"])
+            self.assertEqual(result["free_router"]["provider"], "OpenRouter Free Router")
+
+    def test_compare_models_isolates_invalid_model_error(self):
+        class FakeNotFoundError(Exception):
+            status_code = 404
+
+        with patch.object(_m, "call_openai") as mock_openai, \
+             patch.object(_m, "call_gemini") as mock_gemini, \
+             patch.object(_m, "call_anthropic") as mock_compat:
+            mock_openai.side_effect = FakeNotFoundError("Model unavailable")
+            mock_gemini.return_value = (
+                "Gemini Response",
+                0.4,
+                {"input_tokens": 10, "output_tokens": 20},
+            )
+            mock_compat.return_value = (
+                "Free Router Response",
+                0.2,
+                {"input_tokens": 10, "output_tokens": 20},
+            )
+
+            result = compare_models("Prompt")
+
+        self.assertIn("error", result["gpt4o"])
+        self.assertEqual(result["gemini_flash"]["response"], "Gemini Response")
+        self.assertEqual(result["free_router"]["response"], "Free Router Response")
 
 
 class TestRetryWithBackoff(unittest.TestCase):
@@ -202,6 +328,44 @@ class TestRetryWithBackoff(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             retry_with_backoff(permanent_fail, max_retries=2, base_delay=0.001)
 
+    def test_does_not_retry_authentication_error(self):
+        class FakeAuthenticationError(Exception):
+            status_code = 401
+
+        attempts = 0
+
+        def authenticated_failure():
+            nonlocal attempts
+            attempts += 1
+            raise FakeAuthenticationError("Invalid credentials")
+
+        with self.assertRaises(FakeAuthenticationError):
+            retry_with_backoff(authenticated_failure, max_retries=3, base_delay=0.001)
+
+        self.assertEqual(attempts, 1)
+
+    def test_uses_retry_after_header_for_rate_limit(self):
+        class FakeRateLimitError(Exception):
+            status_code = 429
+
+        response = MagicMock()
+        response.headers = {"retry-after": "2"}
+        error = FakeRateLimitError("Too many requests")
+        error.response = response
+        attempts = 0
+
+        def rate_limited():
+            nonlocal attempts
+            attempts += 1
+            raise error
+
+        with patch.object(_m.time, "sleep") as mock_sleep:
+            with self.assertRaises(FakeRateLimitError):
+                retry_with_backoff(rate_limited, max_retries=1, base_delay=0.001)
+
+        self.assertEqual(attempts, 2)
+        mock_sleep.assert_called_once_with(2.0)
+
 
 class TestBatchCompareAndFormat(unittest.TestCase):
 
@@ -212,6 +376,8 @@ class TestBatchCompareAndFormat(unittest.TestCase):
                     "gpt4o": {"response": "GPT-4o response content here", "latency": 0.5, "cost": 0.00045, "input_tokens": 10, "output_tokens": 20},
                     "gpt4o_mini": {"response": "GPT-4o-Mini response content here", "latency": 0.3, "cost": 0.0000135, "input_tokens": 10, "output_tokens": 20},
                     "gemini_flash": {"response": "Gemini response content here", "latency": 0.4, "cost": 0.00000675, "input_tokens": 10, "output_tokens": 20}
+                    ,
+                    "free_router": {"response": "", "latency": 0.2, "cost": None, "input_tokens": 0, "output_tokens": 0, "provider": "OpenRouter Free Router", "model": "openrouter/free", "error": "RuntimeError: unavailable"}
                 }
             mock_comp.side_effect = _get_mock
 
@@ -223,7 +389,9 @@ class TestBatchCompareAndFormat(unittest.TestCase):
             self.assertIsInstance(table, str)
             self.assertIn("Prompt", table)
             self.assertIn("GPT-4o", table)
-            self.assertIn("Gemini-Flash", table)
+            self.assertIn("gemini-3.8-flash", table)
+            self.assertIn("OpenRouter Free Router", table)
+            self.assertIn("unavailable", table)
             self.assertIn("Q1", table)
 
 
@@ -237,6 +405,33 @@ class TestStreamingChatbot(unittest.TestCase):
             streaming_chatbot()
         except SystemExit:
             pass
+
+    @patch("builtins.input", side_effect=["hello", "quit"])
+    @patch("google.genai.Client")
+    def test_handles_streaming_error(self, MockClient, mock_input):
+        mock_client = MagicMock()
+        MockClient.return_value = mock_client
+        mock_client.models.generate_content_stream.side_effect = RuntimeError("offline")
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            streaming_chatbot()
+
+        self.assertIn("Gemini streaming error", output.getvalue())
+        self.assertIn("offline", output.getvalue())
+
+    @patch("builtins.input", side_effect=["hello", "quit"])
+    @patch("google.genai.Client")
+    def test_handles_empty_stream(self, MockClient, mock_input):
+        mock_client = MagicMock()
+        MockClient.return_value = mock_client
+        mock_client.models.generate_content_stream.return_value = iter([])
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            streaming_chatbot()
+
+        self.assertIn("empty stream", output.getvalue())
 
 
 if __name__ == "__main__":
